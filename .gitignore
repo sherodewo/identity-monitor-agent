@@ -1,0 +1,16 @@
+.tools/
+models/
+runtime/
+bin/
+.env
+configs/config.yaml
+configs/subjects.yaml
+data/
+evidence/
+reports/
+*.db
+*.db-shm
+*.db-wal
+*.log
+coverage.out
+.idea/

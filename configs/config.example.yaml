@@ -1,0 +1,64 @@
+app:
+  timezone: Asia/Jakarta
+  http_address: "127.0.0.1:8080"
+  data_directory: ./data
+  evidence_directory: ./evidence
+  report_directory: ./reports
+  api_token: "${LOCAL_API_TOKEN}"
+scheduler:
+  enabled: true
+  start_time: "08:00"
+  stop_time: "17:00"
+  daily_report_time: "17:00"
+  max_concurrent_jobs: 1
+  interval_minutes: 60
+  job_timeout_seconds: 600
+browser:
+  executable_path: ""
+  headless: false
+  profile_directory: ./data/browser-profiles
+  page_timeout_seconds: 45
+  max_scroll_per_query: 10
+  delay_milliseconds: 3000
+ollama:
+  base_url: http://127.0.0.1:11434
+  text_model: "${OLLAMA_TEXT_MODEL}"
+  vision_model: "${OLLAMA_VISION_MODEL}"
+  timeout_seconds: 120
+
+sentiment:
+  provider: indobert
+  model_path: ./models/indobert-sentiment/model.onnx
+  vocabulary_path: ./models/indobert-sentiment/vocab.txt
+  runtime_library_path: ./runtime/onnxruntime/onnxruntime.dll
+  max_tokens: 256
+  confidence_threshold: 0.65
+guardrails:
+  max_agent_steps: 20
+  max_navigation_per_task: 10
+  agent_timeout_seconds: 120
+  stop_on_captcha: true
+  stop_on_login_required: true
+  require_approval_for_external_action: true
+retention:
+  mention_days: 90
+  screenshot_days: 30
+  audit_log_days: 365
+risk_threshold: 70
+image_distance: 8
+sources:
+  - name: generic_web_search
+    enabled: true
+    search_url: "https://www.google.com/search?q=%s"
+    allowed_domains: [www.google.com]
+    max_results: 10
+  - name: youtube_public_search
+    enabled: true
+    search_url: "https://www.youtube.com/results?search_query=%s"
+    allowed_domains: [www.youtube.com, i.ytimg.com]
+    max_results: 10
+  - name: threads_public_search
+    enabled: true
+    search_url: "https://www.threads.com/search?q=%s"
+    allowed_domains: [www.threads.com, scontent.cdninstagram.com]
+    max_results: 0 # Collect all posts found within the scroll/time budget

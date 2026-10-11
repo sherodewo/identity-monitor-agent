@@ -1,0 +1,11 @@
+subjects:
+  - id: subject-001
+    full_name: Nama Lengkap
+    popular_name: Nama Populer
+    position: Jabatan
+    institution: Instansi
+    aliases: [Variasi Nama]
+    spelling_variants: []
+    official_handles: ['@akunresmi']
+    risk_keywords: [penipuan, akun palsu, deepfake, ancaman]
+    reference_images: [] # Add an existing local JPEG/PNG; missing files fail startup.

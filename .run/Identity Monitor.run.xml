@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Identity Monitor" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="identity-monitor-agent" />
+    <working_directory value="$PROJECT_DIR$" />
+    <parameters value="serve --subjects=configs/subjects.yaml --address=127.0.0.1:8081" />
+    <go_parameters value="-ldflags=-linkmode=internal" />
+    <kind value="PACKAGE" />
+    <package value="identity-monitor-agent/cmd/collector" />
+    <directory value="$PROJECT_DIR$" />
+    <method v="2" />
+  </configuration>
+</component>

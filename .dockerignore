@@ -1,0 +1,11 @@
+.tools
+bin
+data
+evidence
+reports
+.env
+.git
+.idea
+metronic_html_v8.2.3_demo2
+configs/config.yaml
+configs/subjects.yaml

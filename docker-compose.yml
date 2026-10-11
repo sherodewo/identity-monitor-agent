@@ -1,0 +1,10 @@
+services:
+  ollama:
+    image: ollama/ollama:0.12.3
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+volumes:
+  ollama:
