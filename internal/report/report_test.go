@@ -18,7 +18,7 @@ func TestReportAndTimezone(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, db.UpsertSubject(ctx, model.Subject{ID: "s", FullName: "S"}))
 	at := time.Date(2026, 10, 5, 18, 0, 0, 0, time.UTC)
-	_, _, e = db.SaveMention(ctx, model.Mention{SubjectID: "s", ContentHash: "hash", AnalysisStatus: "COMPLETED", RawMention: model.RawMention{Source: "fixture", SourceURL: "https://example.org", ContentText: "=HYPERLINK(unsafe)", CollectedAt: at}, Analysis: model.AnalysisResult{Sentiment: "neutral", RiskCategory: "normal_mention"}}, 70)
+	_, _, e = db.SaveMention(ctx, model.Mention{SubjectID: "s", ContentHash: "hash", AnalysisStatus: "COMPLETED", RawMention: model.RawMention{Source: "fixture", SourceURL: "https://example.org", ContentText: "=HYPERLINK(unsafe)", CollectedAt: at}, Analysis: model.AnalysisResult{Relevant: true, Sentiment: "neutral", RiskCategory: "normal_mention"}}, 70)
 	require.NoError(t, e)
 	svc := Service{Store: db, Directory: t.TempDir(), Threshold: 70}
 	d, e := svc.Generate(ctx, "2026-10-06")

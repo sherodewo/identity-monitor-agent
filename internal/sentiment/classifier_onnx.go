@@ -31,7 +31,7 @@ func New(c config.Sentiment) (Classifier, error) {
 	}
 	tokenizer, err := loadTokenizer(c.VocabularyPath)
 	if err != nil {
-		return nil, fmt.Errorf("load IndoBERT vocabulary: %w; run scripts\\setup-indobert.cmd", err)
+		return nil, fmt.Errorf("load IndoBERT vocabulary: %w; run the IndoBERT setup script for your platform", err)
 	}
 	ort.SetSharedLibraryPath(c.RuntimeLibraryPath)
 	if err := ort.InitializeEnvironment(); err != nil {

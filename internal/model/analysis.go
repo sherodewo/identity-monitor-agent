@@ -3,6 +3,9 @@ package model
 import "time"
 
 type AnalysisResult struct {
+	ManualRelevance     string    `json:"manual_relevance,omitempty"`
+	SentimentStatus     string    `json:"sentiment_status,omitempty"`
+	ContextStatus       string    `json:"context_status,omitempty"`
 	Relevant            bool      `json:"relevant"`
 	IdentityConfidence  float64   `json:"identity_confidence"`
 	Sentiment           string    `json:"sentiment"`

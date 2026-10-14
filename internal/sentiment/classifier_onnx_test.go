@@ -5,6 +5,7 @@ package sentiment
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -16,7 +17,14 @@ func TestONNXIndoBERT(t *testing.T) {
 	c := config.Defaults().Sentiment
 	c.ModelPath = filepath.Join(root, "models", "indobert-sentiment", "model.onnx")
 	c.VocabularyPath = filepath.Join(root, "models", "indobert-sentiment", "vocab.txt")
-	c.RuntimeLibraryPath = filepath.Join(root, "runtime", "onnxruntime", "onnxruntime.dll")
+	runtimeLibrary := "libonnxruntime.so"
+	switch runtime.GOOS {
+	case "darwin":
+		runtimeLibrary = "libonnxruntime.dylib"
+	case "windows":
+		runtimeLibrary = "onnxruntime.dll"
+	}
+	c.RuntimeLibraryPath = filepath.Join(root, "runtime", "onnxruntime", runtimeLibrary)
 	classifier, err := New(c)
 	if err != nil {
 		t.Skipf("IndoBERT assets are not installed: %v", err)

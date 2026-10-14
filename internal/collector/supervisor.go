@@ -13,6 +13,7 @@ import (
 	"identity-monitor-agent/internal/imagehash"
 	"identity-monitor-agent/internal/model"
 	"identity-monitor-agent/internal/observability"
+	"identity-monitor-agent/internal/sentiment"
 	"identity-monitor-agent/internal/source"
 	"identity-monitor-agent/internal/storage"
 	"log/slog"
@@ -21,24 +22,34 @@ import (
 )
 
 type Supervisor struct {
-	Config   config.Config
-	Store    *storage.SQLite
-	Analyzer analyzer.Analyzer
-	Sources  map[string]source.SourceAdapter
-	Metrics  *observability.Metrics
-	Images   *imagehash.Service
-	mu       sync.Mutex
-	active   map[string]string
-	slots    chan struct{}
-	wg       sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
-	closing  bool
+	Config          config.Config
+	Store           *storage.SQLite
+	Analyzer        analyzer.Analyzer
+	Sources         map[string]source.SourceAdapter
+	Metrics         *observability.Metrics
+	Images          *imagehash.Service
+	mu              sync.Mutex
+	active          map[string]string
+	slots           chan struct{}
+	wg              sync.WaitGroup
+	ctx             context.Context
+	cancel          context.CancelFunc
+	batch           BatchProgress
+	analysisBusy    int
+	closing         bool
+	sentiment       sentiment.Classifier
+	sentimentWake   chan struct{}
+	contextWake     chan struct{}
+	analysisStarted bool
 }
 
-func New(ctx context.Context, c config.Config, db *storage.SQLite, a analyzer.Analyzer, sources map[string]source.SourceAdapter, m *observability.Metrics) *Supervisor {
+func New(ctx context.Context, c config.Config, db *storage.SQLite, a analyzer.Analyzer, sources map[string]source.SourceAdapter, m *observability.Metrics, classifiers ...sentiment.Classifier) *Supervisor {
 	ctx, cancel := context.WithCancel(ctx)
-	return &Supervisor{Config: c, Store: db, Analyzer: a, Sources: sources, Metrics: m, Images: &imagehash.Service{Store: db, Threshold: c.ImageDistance}, active: map[string]string{}, slots: make(chan struct{}, c.Scheduler.MaxConcurrentJobs), ctx: ctx, cancel: cancel}
+	s := &Supervisor{Config: c, Store: db, Analyzer: a, Sources: sources, Metrics: m, Images: &imagehash.Service{Store: db, Threshold: c.ImageDistance}, active: map[string]string{}, slots: make(chan struct{}, c.Scheduler.MaxConcurrentJobs), ctx: ctx, cancel: cancel, sentimentWake: make(chan struct{}, 1), contextWake: make(chan struct{}, 1)}
+	if len(classifiers) > 0 {
+		s.sentiment = classifiers[0]
+	}
+	return s
 }
 func (s *Supervisor) Stop() { s.mu.Lock(); s.closing = true; s.cancel(); s.mu.Unlock(); s.wg.Wait() }
 func (s *Supervisor) Active() map[string]string {
@@ -65,6 +76,9 @@ func (s *Supervisor) Submit(ctx context.Context, subjectID, sourceName, query st
 }
 
 func (s *Supervisor) SubmitFiltered(ctx context.Context, subjectID, sourceName, query, dateFrom, dateTo string) (model.Run, error) {
+	return s.submitExecution(ctx, subjectID, sourceName, query, dateFrom, dateTo, "")
+}
+func (s *Supervisor) submitExecution(ctx context.Context, subjectID, sourceName, query, dateFrom, dateTo, executionID string) (model.Run, error) {
 	if _, ok := s.Sources[sourceName]; !ok {
 		return model.Run{}, fmt.Errorf("unknown or disabled source")
 	}
@@ -95,6 +109,9 @@ func (s *Supervisor) SubmitFiltered(ctx context.Context, subjectID, sourceName, 
 			return model.Run{}, e
 		}
 	}
+	if e = s.startAnalysis(); e != nil {
+		return model.Run{}, e
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closing {
@@ -113,7 +130,10 @@ func (s *Supervisor) SubmitFiltered(ctx context.Context, subjectID, sourceName, 
 		<-s.slots
 		return model.Run{}, e
 	}
-	r := model.Run{ID: hex.EncodeToString(b), SubjectID: subjectID, Source: sourceName, Query: query, DateFrom: dateFrom, DateTo: dateTo, Status: "PENDING", StartedAt: time.Now().UTC()}
+	r := model.Run{ExecutionID: executionID, ID: hex.EncodeToString(b), SubjectID: subjectID, Source: sourceName, Query: query, DateFrom: dateFrom, DateTo: dateTo, Status: "PENDING", StartedAt: time.Now().UTC()}
+	if r.ExecutionID == "" {
+		r.ExecutionID = r.ID
+	}
 	if e = s.Store.CreateRun(ctx, r); e != nil {
 		<-s.slots
 		return model.Run{}, e
@@ -151,11 +171,9 @@ func (s *Supervisor) execute(r model.Run, subject model.Subject) {
 	log := slog.With("run_id", r.ID, "task_id", r.ID, "subject_id", subject.ID, "source", r.Source, "query_hash", extractor.Hash(r.Query))
 	log.Info("collection started")
 	maxResults := 10
-	var domains []string
 	for _, src := range s.Config.Sources {
 		if src.Name == r.Source {
 			maxResults = src.MaxResults
-			domains = src.AllowedDomains
 		}
 	}
 	mentions, e := s.Sources[r.Source].Search(ctx, model.SearchTask{ID: r.ID, SubjectID: subject.ID, Source: r.Source, Query: r.Query, MaxResults: maxResults, DateFrom: r.DateFrom, DateTo: r.DateTo})
@@ -173,30 +191,8 @@ func (s *Supervisor) execute(r model.Run, subject model.Subject) {
 				r.TotalFailed++
 				continue
 			}
-			duplicate, de := s.Store.Duplicate(ctx, subject.ID, normalized.Source, normalized.SourceURL, extractor.Hash(normalized.ContentText))
-			if de != nil {
-				e = de
-				break
-			}
-			if duplicate {
-				r.TotalDuplicate++
-				s.Metrics.Inc("collector_duplicates_total")
-				if updateErr := s.Store.UpdateRun(ctx, r); updateErr != nil {
-					e = updateErr
-					break
-				}
-				continue
-			}
-			a, ae := s.Analyzer.Analyze(ctx, subject, normalized)
-			if normalized.RawMetadata["extraction_confidence"] == "low" {
-				a.RequiresReview = true
-			}
-			status := "COMPLETED"
-			if ae != nil {
-				status = "ANALYSIS_FAILED"
-			}
-			m := model.Mention{SubjectID: subject.ID, RawMention: normalized, ContentHash: extractor.Hash(normalized.ContentText), Analysis: a, AnalysisStatus: status}
-			id, duplicate, se := s.Store.SaveMention(ctx, m, s.Config.RiskThreshold)
+			m := model.Mention{SubjectID: subject.ID, RawMention: normalized, ContentHash: extractor.Hash(normalized.ContentText), Analysis: model.AnalysisResult{Sentiment: "unknown", RiskCategory: "unknown"}, AnalysisStatus: "PENDING"}
+			_, duplicate, se := s.Store.SaveMentionForRun(ctx, m, s.Config.RiskThreshold, r.ID)
 			if se != nil {
 				r.TotalFailed++
 				s.Metrics.Inc("collector_errors_total")
@@ -206,13 +202,7 @@ func (s *Supervisor) execute(r model.Run, subject model.Subject) {
 			} else {
 				r.TotalStored++
 				s.Metrics.Inc("collector_mentions_stored_total")
-				s.Metrics.Inc("analysis_results_total")
-				if a.Relevant && (a.RiskScore >= s.Config.RiskThreshold || a.RiskCategory == "possible_impersonation" || a.RiskCategory == "possible_scam" || a.RiskCategory == "possible_doxxing" || a.RiskCategory == "possible_threat") {
-					s.Metrics.Inc("cases_total")
-				}
-				if ie := s.Images.Candidates(ctx, id, subject, normalized.MediaURLs, domains); ie != nil {
-					log.Warn("image comparison failed", "mention_id", id)
-				}
+				s.notifyAnalysis()
 			}
 			if ue := s.Store.UpdateRun(ctx, r); ue != nil {
 				e = ue
@@ -244,9 +234,31 @@ func (s *Supervisor) execute(r model.Run, subject model.Subject) {
 	if ue := s.Store.UpdateRun(saveCtx, r); ue != nil {
 		log.Error("run finalization failed")
 	}
-	_, n, _ := s.Store.Mentions(saveCtx, model.MentionFilter{Review: true, Limit: 1})
+	_, n, _ := s.Store.Mentions(saveCtx, model.MentionFilter{Relevance: "active", Review: true, Limit: 1})
 	s.Metrics.Review.Set(float64(n))
 	log.Info("collection finished", "status", r.Status, "stored", r.TotalStored, "duplicate", r.TotalDuplicate)
+}
+
+func (s *Supervisor) WaitAnalysis(ctx context.Context) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		pending, e := s.Store.PendingAnalysisCount(ctx)
+		if e != nil {
+			return e
+		}
+		s.mu.Lock()
+		busy := s.analysisBusy
+		s.mu.Unlock()
+		if pending == 0 && busy == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 func (s *Supervisor) Wait(ctx context.Context, id string) (model.Run, error) {
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -350,5 +362,5 @@ func (s *Supervisor) Recover(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	return s.startAnalysis()
 }

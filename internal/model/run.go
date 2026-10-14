@@ -20,6 +20,7 @@ const (
 )
 
 type Run struct {
+	ExecutionID     string     `json:"execution_id"`
 	ID              string     `json:"run_id"`
 	SubjectID       string     `json:"subject_id"`
 	Source          string     `json:"source"`

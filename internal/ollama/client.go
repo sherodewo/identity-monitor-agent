@@ -79,7 +79,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, schema any) (stri
 			c.Metrics.OllamaDuration.Observe(time.Since(start).Seconds())
 		}
 	}()
-	body, e := json.Marshal(map[string]any{"model": c.Config.TextModel, "messages": messages, "format": schema, "stream": false, "options": map[string]any{"temperature": 0}})
+	body, e := json.Marshal(map[string]any{"model": c.Config.TextModel, "messages": messages, "format": schema, "stream": false, "options": map[string]any{"temperature": 0, "num_ctx": 4096, "num_predict": 500}})
 	if e != nil {
 		return "", e
 	}

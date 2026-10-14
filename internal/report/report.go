@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"identity-monitor-agent/internal/model"
 	"identity-monitor-agent/internal/storage"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 )
 
 type Daily struct {
+	Excluded           int            `json:"excluded_irrelevant"`
+	PendingRelevance   int            `json:"pending_relevance"`
 	Date               string         `json:"date"`
 	Total              int            `json:"total_mentions"`
 	Sources            map[string]int `json:"mentions_per_source"`
@@ -43,6 +46,18 @@ func (s *Service) Generate(ctx context.Context, date string) (Daily, error) {
 	if e != nil {
 		return d, e
 	}
+	verified := mentions[:0]
+	for _, m := range mentions {
+		switch m.RelevanceState() {
+		case "excluded":
+			d.Excluded++
+		case "pending":
+			d.PendingRelevance++
+		default:
+			verified = append(verified, m)
+		}
+	}
+	mentions = verified
 	topics := map[string]int{}
 	for _, m := range mentions {
 		d.Total++
@@ -88,7 +103,7 @@ func (s *Service) Generate(ctx context.Context, date string) (Daily, error) {
 			d.HumanRequired++
 		}
 	}
-	cases, e := s.Store.Cases(ctx)
+	cases, e := s.Store.CasesFiltered(ctx, model.MentionFilter{Relevance: "relevant"})
 	if e != nil {
 		return d, e
 	}

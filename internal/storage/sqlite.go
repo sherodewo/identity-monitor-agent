@@ -51,6 +51,10 @@ func Open(path string) (*SQLite, error) {
 		_ = db.Close()
 		return nil, e
 	}
+	if e = s.backfillDedup(); e != nil {
+		_ = db.Close()
+		return nil, e
+	}
 	return s, nil
 }
 func (s *SQLite) Close() error { return s.DB.Close() }
@@ -136,11 +140,27 @@ func (s *SQLite) Subjects(ctx context.Context) ([]model.Subject, error) {
 	return out, rows.Err()
 }
 func (s *SQLite) SaveMention(ctx context.Context, m model.Mention, threshold int) (int64, bool, error) {
+	return s.SaveMentionForRun(ctx, m, threshold, "")
+}
+func (s *SQLite) SaveMentionForRun(ctx context.Context, m model.Mention, threshold int, runID string) (int64, bool, error) {
 	tx, e := s.DB.BeginTx(ctx, nil)
 	if e != nil {
 		return 0, false, e
 	}
 	defer func() { _ = tx.Rollback() }()
+	for _, key := range dedupKeys(m.RawMention) {
+		var existing int64
+		err := tx.QueryRowContext(ctx, "SELECT mention_id FROM mention_dedup WHERE subject_id=? AND source=? AND fingerprint=?", m.SubjectID, m.Source, key).Scan(&existing)
+		if err == nil {
+			if err = linkMention(ctx, tx, runID, existing); err != nil {
+				return 0, false, err
+			}
+			return existing, true, tx.Commit()
+		}
+		if err != sql.ErrNoRows {
+			return 0, false, err
+		}
+	}
 	res, e := tx.ExecContext(ctx, "INSERT INTO mentions(subject_id,source,canonical_url,content_hash,collected_at,data,analysis_status) VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING", m.SubjectID, m.Source, m.SourceURL, m.ContentHash, m.CollectedAt.UTC().Format(time.RFC3339Nano), encode(m.RawMention), m.AnalysisStatus)
 	if e != nil {
 		return 0, false, e
@@ -150,10 +170,20 @@ func (s *SQLite) SaveMention(ctx context.Context, m model.Mention, threshold int
 		return 0, false, e
 	}
 	if n == 0 {
-		return 0, true, nil
+		var existing int64
+		if e = tx.QueryRowContext(ctx, "SELECT id FROM mentions WHERE subject_id=? AND source=? AND (canonical_url=? OR content_hash=?)", m.SubjectID, m.Source, m.SourceURL, m.ContentHash).Scan(&existing); e != nil {
+			return 0, false, e
+		}
+		if e = linkMention(ctx, tx, runID, existing); e != nil {
+			return 0, false, e
+		}
+		return existing, true, tx.Commit()
 	}
 	id, e := res.LastInsertId()
 	if e != nil {
+		return 0, false, e
+	}
+	if e = insertDedup(ctx, tx, id, m); e != nil {
 		return 0, false, e
 	}
 	a := m.Analysis
@@ -170,11 +200,105 @@ func (s *SQLite) SaveMention(ctx context.Context, m model.Mention, threshold int
 			return 0, false, e
 		}
 	}
+	if e = linkMention(ctx, tx, runID, id); e != nil {
+		return 0, false, e
+	}
 	return id, false, tx.Commit()
+}
+
+func (s *SQLite) PendingMentions(ctx context.Context) ([]model.Mention, error) {
+	rows, e := s.DB.QueryContext(ctx, "SELECT m.id,m.subject_id,m.content_hash,m.analysis_status,m.data,a.data FROM mentions m JOIN analysis_results a ON a.mention_id=m.id WHERE m.analysis_status IN ('PENDING','SENTIMENT_RUNNING','CONTEXT_PENDING','ANALYZING') ORDER BY m.id")
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []model.Mention{}
+	for rows.Next() {
+		mention, scanErr := scanMention(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, mention)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) SetAnalysisStatus(ctx context.Context, id int64, status string) error {
+	_, e := s.DB.ExecContext(ctx, "UPDATE mentions SET analysis_status=? WHERE id=?", status, id)
+	return e
+}
+
+func (s *SQLite) CompleteAnalysis(ctx context.Context, id int64, a model.AnalysisResult, status string, threshold int) error {
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer func() { _ = tx.Rollback() }()
+	var stored string
+	if e = tx.QueryRowContext(ctx, "SELECT data FROM analysis_results WHERE mention_id=?", id).Scan(&stored); e != nil {
+		return e
+	}
+	var previous model.AnalysisResult
+	if e = json.Unmarshal([]byte(stored), &previous); e != nil {
+		return e
+	}
+	a.ContextStatus = "COMPLETED"
+	if status == "ANALYSIS_FAILED" {
+		a.ContextStatus = "FAILED"
+	}
+	if previous.SentimentStatus == "COMPLETED" || previous.SentimentStatus == "FAILED" {
+		a.Sentiment = previous.Sentiment
+		a.SentimentScore = previous.SentimentScore
+		a.SentimentConfidence = previous.SentimentConfidence
+		a.SentimentModel = previous.SentimentModel
+		a.SentimentStatus = previous.SentimentStatus
+		if a.SentimentStatus == "FAILED" || a.Sentiment == "unknown" {
+			a.RequiresReview = true
+			a.Reasons = append(a.Reasons, previous.Reasons...)
+		}
+		if a.SentimentStatus == "FAILED" {
+			status = "ANALYSIS_FAILED"
+		}
+	} else {
+		a.SentimentStatus = a.ContextStatus
+	}
+
+	if _, e = tx.ExecContext(ctx, "UPDATE mentions SET analysis_status=? WHERE id=?", status, id); e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, "UPDATE analysis_results SET risk_score=?,sentiment=?,category=?,requires_review=?,data=? WHERE mention_id=?", a.RiskScore, a.Sentiment, a.RiskCategory, a.RequiresReview, encode(a), id); e != nil {
+		return e
+	}
+	if a.Relevant && (a.RiskScore >= threshold || strings.Contains("possible_impersonation possible_scam possible_doxxing possible_threat", a.RiskCategory) && a.RiskCategory != "") {
+		var existing int
+		if e = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM cases WHERE mention_id=?", id).Scan(&existing); e != nil {
+			return e
+		}
+		if existing == 0 {
+			if _, e = createCase(ctx, tx, id, "system"); e != nil {
+				return e
+			}
+		}
+	}
+	return tx.Commit()
 }
 func (s *SQLite) filter(f model.MentionFilter) (string, []any) {
 	q := " FROM mentions m JOIN analysis_results a ON a.mention_id=m.id WHERE 1=1"
 	args := []any{}
+	switch f.Relevance {
+	case "active":
+		q += " AND NOT " + excludedSQL
+	case "excluded":
+		q += " AND " + excludedSQL
+	case "relevant":
+		q += " AND (" + manualRelevanceSQL + "='relevant' OR (" + manualRelevanceSQL + "='' AND " + contextDoneSQL + " AND COALESCE(json_extract(a.data,'$.relevant'),0)=1))"
+	case "pending":
+		q += " AND " + manualRelevanceSQL + "='' AND NOT " + contextDoneSQL
+	}
+	if f.Execution != "" {
+		q += " AND EXISTS(SELECT 1 FROM execution_mentions em WHERE em.mention_id=m.id AND em.execution_id=?)"
+		args = append(args, f.Execution)
+	}
 	for _, p := range []struct{ k, v string }{{"m.subject_id", f.Subject}, {"m.source", f.Source}, {"a.sentiment", f.Sentiment}, {"a.category", f.Category}} {
 		if p.v != "" {
 			q += " AND " + p.k + "=?"
@@ -191,7 +315,7 @@ func (s *SQLite) filter(f model.MentionFilter) (string, []any) {
 		args = append(args, f.MinRisk)
 	}
 	if f.Review {
-		q += " AND (a.requires_review=1 OR m.analysis_status='ANALYSIS_FAILED')"
+		q += " AND " + manualRelevanceSQL + "='' AND (a.requires_review=1 OR m.analysis_status='ANALYSIS_FAILED')"
 	}
 	return q, args
 }
@@ -234,18 +358,30 @@ func scanMention(row scanner) (model.Mention, error) {
 		return m, e
 	}
 	e = json.Unmarshal([]byte(a), &m.Analysis)
+	if e == nil {
+		fillStageStatus(&m)
+		m.Relevance = m.RelevanceState()
+	}
 	return m, e
 }
 func (s *SQLite) Mention(ctx context.Context, id int64) (model.Mention, error) {
 	return scanMention(s.DB.QueryRowContext(ctx, "SELECT m.id,m.subject_id,m.content_hash,m.analysis_status,m.data,a.data FROM mentions m JOIN analysis_results a ON a.mention_id=m.id WHERE m.id=?", id))
 }
 func (s *SQLite) CreateRun(ctx context.Context, r model.Run) error {
+	if r.ExecutionID == "" {
+		r.ExecutionID = r.ID
+	}
+
 	tx, e := s.DB.BeginTx(ctx, nil)
 	if e != nil {
 		return e
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, e = tx.ExecContext(ctx, "INSERT INTO collection_runs VALUES (?,?,?,?,?,?)", r.ID, r.SubjectID, r.Source, r.Query, r.Status, encode(r)); e != nil {
+	if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO executions VALUES(?,?,?,?)", r.ExecutionID, now(), r.Query, 1); e != nil {
+		return e
+	}
+
+	if _, e = tx.ExecContext(ctx, "INSERT INTO collection_runs(id,subject_id,source,query,status,data,execution_id) VALUES (?,?,?,?,?,?,?)", r.ID, r.SubjectID, r.Source, r.Query, r.Status, encode(r), r.ExecutionID); e != nil {
 		return e
 	}
 	if _, e = tx.ExecContext(ctx, "INSERT INTO search_tasks(id,status) VALUES (?,?)", r.ID, r.Status); e != nil {

@@ -20,6 +20,12 @@ func URL(raw string) (string, error) {
 	}
 	u.Fragment = ""
 	u.Host = strings.ToLower(u.Host)
+	threadsPost := (u.Host == "www.threads.net" || u.Host == "threads.net" || u.Host == "www.threads.com" || u.Host == "threads.com") && strings.Contains(u.Path, "/post/")
+	if threadsPost {
+		u.Host = "www.threads.com"
+		u.Scheme = "https"
+		u.Path = strings.TrimRight(u.Path, "/")
+	}
 	q := u.Query()
 	for k := range q {
 		if strings.HasPrefix(strings.ToLower(k), "utm_") || k == "fbclid" || k == "gclid" {
@@ -27,6 +33,9 @@ func URL(raw string) (string, error) {
 		}
 	}
 	u.RawQuery = q.Encode()
+	if threadsPost {
+		u.RawQuery = ""
+	}
 	if u.Path == "/" {
 		u.Path = ""
 	}

@@ -1,29 +1,33 @@
-GO ?= go
+GO ?= $(if $(wildcard .tools/go/bin/go),$(CURDIR)/.tools/go/bin/go,go)
+GOMODCACHE ?= $(CURDIR)/.cache/go-mod
+GOCACHE ?= $(CURDIR)/.cache/go-build
 SOURCE ?= generic_web_search
 SUBJECT ?= subject-001
 DATE ?=
-.PHONY: setup setup-indobert run demo test test-race lint build migrate browser-bootstrap run-once report
+.PHONY: setup setup-indobert setup-indobert-macos run demo test test-race lint build migrate browser-bootstrap run-once report
 setup:
-	$(GO) mod download
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) mod download
 setup-indobert:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/setup-indobert.ps1
+setup-indobert-macos:
+	sh scripts/setup-indobert.sh
 run:
-	$(GO) run ./cmd/collector serve
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) run ./cmd/collector serve
 demo:
-	$(GO) run ./cmd/collector demo
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) run ./cmd/collector demo
 test:
-	$(GO) test ./...
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) test ./...
 test-race:
-	$(GO) test -race ./...
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) test -race ./...
 lint:
 	golangci-lint run
 build:
-	$(GO) build -ldflags '-linkmode=internal' -o bin/identity-monitor-agent ./cmd/collector
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) build -ldflags '-linkmode=internal' -o bin/identity-monitor-agent ./cmd/collector
 migrate:
-	$(GO) run ./cmd/collector migrate
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) run ./cmd/collector migrate
 browser-bootstrap:
-	$(GO) run ./cmd/collector browser bootstrap --source=$(SOURCE)
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) run ./cmd/collector browser bootstrap --source=$(SOURCE)
 run-once:
-	$(GO) run ./cmd/collector run-once --subject=$(SUBJECT) --source=$(SOURCE)
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) run ./cmd/collector run-once --subject=$(SUBJECT) --source=$(SOURCE)
 report:
-	$(GO) run ./cmd/collector report --date=$(DATE)
+	GOMODCACHE=$(GOMODCACHE) GOCACHE=$(GOCACHE) $(GO) run ./cmd/collector report --date=$(DATE)

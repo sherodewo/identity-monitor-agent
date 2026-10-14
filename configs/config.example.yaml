@@ -18,7 +18,7 @@ browser:
   headless: false
   profile_directory: ./data/browser-profiles
   page_timeout_seconds: 45
-  max_scroll_per_query: 10
+  max_scroll_per_query: 6
   delay_milliseconds: 3000
 ollama:
   base_url: http://127.0.0.1:11434

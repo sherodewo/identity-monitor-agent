@@ -79,7 +79,16 @@ func (m *Manager) Open(ctx context.Context, source string, policy guardrail.Poli
 	alloc, ac := chromedp.NewExecAllocator(ctx, opts...)
 	tab, tc := chromedp.NewContext(alloc)
 	var closeOnce sync.Once
-	s := &Session{ctx: tab, manager: m, policy: policy, cancel: func() { closeOnce.Do(func() { tc(); ac(); release() }) }}
+	s := &Session{ctx: tab, manager: m, policy: policy, cancel: func() {
+		closeOnce.Do(func() {
+			// Let Chrome shut down cleanly so cookies and session storage in the
+			// dedicated user-data directory are flushed before the process exits.
+			_ = chromedp.Cancel(tab)
+			tc()
+			ac()
+			release()
+		})
+	}}
 	if e = chromedp.Run(tab, cdpbrowser.SetDownloadBehavior(cdpbrowser.SetDownloadBehaviorBehaviorDeny)); e != nil {
 		s.Close()
 		return nil, fmt.Errorf("start Chrome (check executable_path): %w", e)

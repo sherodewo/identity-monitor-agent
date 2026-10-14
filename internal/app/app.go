@@ -109,15 +109,15 @@ func Open(ctx context.Context, c config.Config, subjectsPath string, needAI bool
 			adapters[s.Name] = &source.Adapter{Config: s, Browser: r.Browser, Fallback: fallback, Guardrails: c.Guardrails}
 		}
 	}
-	var analysisService analyzer.Analyzer = &analyzer.Local{Client: client, Threshold: c.RiskThreshold}
+	analysisService := &analyzer.Local{Client: client, Threshold: c.RiskThreshold}
 	if needAI && !c.Demo && c.Sentiment.Provider == "indobert" {
 		r.sentiment, e = sentiment.New(c.Sentiment)
 		if e != nil {
 			return nil, fmt.Errorf("initialize IndoBERT sentiment: %w", e)
 		}
-		analysisService = &analyzer.Hybrid{Base: analysisService, Sentiment: r.sentiment}
+		analysisService.ContextOnly = true
 	}
-	r.Supervisor = collector.New(ctx, c, db, analysisService, adapters, metrics)
+	r.Supervisor = collector.New(ctx, c, db, analysisService, adapters, metrics, r.sentiment)
 	for _, subject := range subjects {
 		if e = r.Supervisor.Images.References(ctx, subject); e != nil {
 			return nil, e
@@ -170,6 +170,9 @@ func (r *Runtime) Demo(ctx context.Context) error {
 		if finished.Status != "COMPLETED" {
 			return fmt.Errorf("demo run %s: %s", finished.Status, finished.ErrorMessage)
 		}
+	}
+	if e = r.Supervisor.WaitAnalysis(ctx); e != nil {
+		return e
 	}
 	_, e = r.Reports.Generate(ctx, time.Now().In(r.Store.Location).Format("2006-01-02"))
 	return e

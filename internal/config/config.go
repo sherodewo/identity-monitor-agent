@@ -135,7 +135,7 @@ func Defaults() Config {
 	return Config{
 		App:        App{Timezone: "Asia/Jakarta", HTTPAddress: "127.0.0.1:8080", DataDirectory: "./data", EvidenceDirectory: "./evidence", ReportDirectory: "./reports"},
 		Scheduler:  Scheduler{Enabled: true, StartTime: "08:00", StopTime: "17:00", DailyReportTime: "17:00", MaxConcurrentJobs: 1, IntervalMinutes: 60, JobTimeoutSeconds: 600},
-		Browser:    Browser{ProfileDirectory: "./data/browser-profiles", PageTimeoutSeconds: 45, MaxScrollPerQuery: 3, DelayMilliseconds: 2000},
+		Browser:    Browser{ProfileDirectory: "./data/browser-profiles", PageTimeoutSeconds: 45, MaxScrollPerQuery: 6, DelayMilliseconds: 3000},
 		Ollama:     Ollama{BaseURL: "http://127.0.0.1:11434", TimeoutSeconds: 120},
 		Sentiment:  Sentiment{Provider: "indobert", ModelPath: "./models/indobert-sentiment/model.onnx", VocabularyPath: "./models/indobert-sentiment/vocab.txt", RuntimeLibraryPath: "./runtime/onnxruntime/onnxruntime.dll", MaxTokens: 256, ConfidenceThreshold: 0.65},
 		Guardrails: Guardrails{MaxAgentSteps: 20, MaxNavigationPerTask: 10, StopOnCaptcha: true, StopOnLoginRequired: true, RequireApproval: true, AgentTimeoutSeconds: 120},

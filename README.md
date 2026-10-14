@@ -1,6 +1,6 @@
 # identity-monitor-agent
 
-Agent Go 1.25 untuk monitoring penyebutan publik, analisis risiko dengan Ollama lokal, klasifikasi sentimen IndoBERT lokal, review manusia, dan laporan harian. Dashboard memakai layout social Metronic 8.2.3 demo2 dan CSS dari template yang tersedia di workspace, di-embed ke binary; tidak memerlukan Node atau CDN.
+Agent Go 1.27.2 untuk monitoring penyebutan publik, analisis risiko dengan Ollama lokal, klasifikasi sentimen IndoBERT lokal, review manusia, dan laporan harian. Dashboard memakai layout social Metronic 8.2.3 demo2 dan CSS dari template yang tersedia di workspace, di-embed ke binary; tidak memerlukan Node atau CDN.
 
 **Tidak ada API pengiriman report/takedown atau engagement ke platform.** `APPROVED` hanya catatan persetujuan. Operator sendiri melakukan pelaporan melalui platform, lalu memilih `Mark as submitted manually`.
 
@@ -32,11 +32,11 @@ Untuk server live di Windows, gunakan script kontrol agar proses mudah ditemukan
 .\bin\identity-monitor-agent.exe demo --address=127.0.0.1:8081
 ```
 
-Go sistem workspace awal adalah 1.20.9. Toolchain Go 1.25.14 yang diunduh dari go.dev dan diverifikasi SHA-256 tersedia lokal di `.tools/go/bin`; skrip Windows otomatis memakainya tanpa mengubah Go sistem. `.tools` tidak masuk Git. Pada komputer lain instal Go 1.25 dari [distribusi resmi Go](https://go.dev/dl/), lalu gunakan `go` atau Makefile.
+Proyek menggunakan Go 1.27.2. Toolchain macOS arm64 tersedia lokal di `.tools/go/bin`, diunduh dari go.dev dan diverifikasi SHA-256. Makefile otomatis memakai toolchain lokal tersebut; skrip Windows memakai `.tools/go/bin/go.exe` jika tersedia. `.tools` tidak masuk Git. Pada komputer lain instal Go 1.27.2 dari [distribusi resmi Go](https://go.dev/dl/), lalu gunakan `go` atau Makefile.
 
 ## Prasyarat dan mode live
 
-1. Go 1.25, Chrome/Chromium, dan Ollama lokal. Chrome dapat dideteksi otomatis; isi `browser.executable_path` jika diperlukan. Headful adalah default.
+1. Go 1.27.2, Chrome/Chromium, dan Ollama lokal. Chrome dapat dideteksi otomatis; isi `browser.executable_path` jika diperlukan. Headful adalah default.
 2. Instal Ollama dari [situs resmi](https://ollama.com/download). Pilih model instruksi yang cocok dengan RAM/VRAM dan mendukung structured output dari [library model](https://ollama.com/library). Tidak ada nama model live yang di-hardcode.
 3. Unduh model pilihan menggunakan `ollama pull <nama-model>`, lalu jalankan `ollama serve` jika layanan belum aktif. `ollama list` menunjukkan model yang tersedia.
 4. Salin konfigurasi dan isi subjek yang memiliki dasar monitoring yang sah:
@@ -59,6 +59,12 @@ Untuk mengaktifkan IndoBERT sekali saja di Windows:
 
 ```powershell
 .\scripts\setup-indobert.cmd
+```
+
+Di macOS Apple Silicon atau Intel:
+
+```bash
+make setup-indobert-macos
 ```
 
 Script ini mengunduh model INT8 `mdhugol/indonesia-bert-sentiment-classification` yang sudah dikonversi ke ONNX serta ONNX Runtime 1.29.0. Inferensi kemudian berjalan di proses Go yang sama tanpa Python dan tanpa API cloud. Label model adalah `positive`, `neutral`, dan `negative`; confidence di bawah ambang konfigurasi menjadi `unknown`. Model dan runtime disimpan lokal pada direktori yang diabaikan Git.
@@ -107,10 +113,10 @@ Tidak ada paket uploader karena MVP tidak mengunggah file atau mengirim laporan.
 
 ## Perilaku operasional
 
-- Default jadwal **08:00–17:00 Asia/Jakarta**, trigger pada jam mulai dan interval 60 menit. Deadline job dipotong pada 17:00. Default 1 job; konfigurasi maksimal 4, tetap hanya 1 browser per source. Query diproses berurutan dengan delay minimum 500 ms; default 2 detik, maksimum 10 hasil dan 3 scroll.
+- Default jadwal **08:00–17:00 Asia/Jakarta**, trigger pada jam mulai dan interval 60 menit. Deadline job dipotong pada 17:00. Default 1 job; konfigurasi maksimal 4, tetap hanya 1 browser per source. Query diproses berurutan dengan delay minimum 500 ms; default 3 detik, maksimum 10 hasil dan 6 scroll.
 - File lock mencegah dua collector memakai data directory yang sama. SQLite unique constraint juga mencegah job identik aktif bersamaan. Run tersimpan sebelum eksekusi, dengan checkpoint jumlah yang sudah diproses. Run terputus menjadi `PAUSED`; retry melakukan pencarian ulang dengan deduplikasi, bukan memulihkan DOM browser lama. Scheduler mengulang query pada siklus berikutnya; retry manual tersedia untuk `FAILED`, `PAUSED`, dan `HUMAN_ACTION_REQUIRED`.
 - Source yang run terakhirnya `HUMAN_ACTION_REQUIRED` dilewati scheduler sampai operator bootstrap dan retry manual berhasil. Tidak ada percobaan menyelesaikan challenge oleh AI.
-- Deduplikasi per subjek/source memakai canonical URL atau hash teks ternormalisasi, diperiksa **sebelum** inferensi dan dilindungi unique constraints ketika commit. Mention + analysis + case otomatis + bukti + audit disimpan dalam satu transaksi.
+- Deduplikasi per subjek/source memakai canonical URL atau hash teks ternormalisasi, diperiksa **sebelum** inferensi dan dilindungi unique constraints ketika commit. Mention disimpan sebagai `PENDING`, sehingga browser bisa lanjut ke pencarian berikutnya sementara worker sentimen dan konteks berjalan paralel. IndoBERT menyimpan sentimen terlebih dahulu; worker Ollama kemudian menambahkan konteks dan risiko tanpa menimpa sentimen. Hasil analysis, case otomatis, bukti, dan audit kemudian disimpan secara transaksional. Antrean kedua tahap tersimpan di SQLite dan dilanjutkan kembali saat service restart.
 - Analisis JSON divalidasi field, enum, tipe dan rentang. Maksimum satu repair JSON, retry transport maksimal satu. Kegagalan disimpan `ANALYSIS_FAILED` dan masuk review, bukan hasil sentimen palsu. Kritik/mention normal tidak menjadi violation hanya karena negatif. Case otomatis untuk skor melewati threshold atau kandidat impersonation/scam/doxxing/threat yang relevan.
 - Fallback hanya setelah layout deterministik gagal. Maksimum 20 langkah, timeout 120 detik, domain dan navigasi dibatasi. `type_text`, `click_element`, dan `go_back` sengaja tidak dieksekusi dalam MVP. Tools tersebut memiliki schema, tetapi policy/runtime menolaknya. Fallback dapat membaca, scroll, screenshot, navigasi URL yang diizinkan, atau meminta bantuan; ekstraksi alternatif selalu ditandai low confidence untuk reviewer. Semua instruksi dari halaman adalah data tidak tepercaya.
 - Screenshot merupakan halaman hasil pencarian saat koleksi, bukan bukti bahwa halaman tujuan sudah diverifikasi. Semua hasil live dalam satu query mendapat screenshot konteks; error browser mencoba mengambil diagnostic screenshot. Fixture demo tidak memalsukan screenshot evidence.
@@ -187,7 +193,7 @@ SQLite/profile/evidence/report/config lokal/.env diabaikan Git. Workspace awal b
 
 Troubleshooting:
 
-- **Go version error:** gunakan `.tools/go/bin/go.exe` atau instal Go 1.25, bukan Go sistem 1.20.
+- **Go version error:** gunakan `.tools/go/bin/go.exe` atau instal Go 1.27.2. Pada macOS/Linux, Makefile otomatis memakai `.tools/go/bin/go` jika tersedia.
 - **Ollama/model unavailable:** jalankan Ollama, `ollama list`, `ollama pull <model>`, cocokkan nama environment/YAML. Tidak ada fallback cloud.
 - **Chrome tidak ditemukan:** set `browser.executable_path` ke executable Chrome/Chromium. Jangan menunjuk profile browser pribadi.
 - **Session expired/CAPTCHA/MFA:** run menjadi `HUMAN_ACTION_REQUIRED`; lakukan bootstrap manual, kemudian Retry. Challenge tidak dibypass.
@@ -200,3 +206,81 @@ Troubleshooting:
 Fase berikutnya: uji adapter pada akun monitoring sah, kalibrasi analisis memakai dataset berlabel, perbaiki provenance gambar dan ekstraksi metadata relatif, identitas reviewer multi-user, backfill scheduler saat laptop bangun, dan strategi arsip terverifikasi. Tidak menambahkan pengiriman takedown otomatis.
 
 Referensi implementasi: [chromedp](https://pkg.go.dev/github.com/chromedp/chromedp), [Ollama Chat API](https://docs.ollama.com/api/chat).
+
+### Antrean dashboard dan progres
+
+Dashboard mengirim hingga 50 query sekaligus lewat `POST /api/v1/batches`.
+Server menjalankan query berikutnya tanpa timer tab browser; tab boleh ditutup
+selama service tetap hidup. Tombol hentikan menyelesaikan pencarian aktif lalu
+membatalkan sisa antrean. Antrean query berada di memori selama service berjalan;
+setelah restart, kirim ulang sisa query. Antrean analisis tetap tersimpan di SQLite.
+
+Panel progres menampilkan query selesai pada antrean terakhir, total data tersimpan,
+duplikat dilewati, dan analisis berhasil/gagal/aktif/menunggu untuk seluruh data.
+Persentase analisis dapat turun ketika scraping menambahkan data baru.
+
+Deduplikasi sebelum analisis memakai URL posting dan teks yang dinormalisasi
+(Unicode, kapitalisasi, spasi, dan karakter tak terlihat), per subjek dan sumber.
+URL posting Threads `.net`/`.com` dan parameter berbagi diperlakukan setara.
+Indeks juga mencakup data lama saat startup; duplikat lama tidak dihapus otomatis.
+
+### Tampilan per eksekusi dan hapus data
+
+Satu pengiriman antrean dashboard menghasilkan satu eksekusi yang tersimpan di
+SQLite. Dropdown **Tampilkan eksekusi** membuka eksekusi terbaru secara default;
+pilih **Semua data** untuk gabungan seluruh riwayat. Filter berlaku untuk ringkasan,
+hasil, postingan, review, kasus, riwayat query, dan progres. Laporan harian tetap
+menggabungkan seluruh eksekusi pada tanggal laporan.
+
+Detail posting menunjukkan query, run, dan eksekusi yang menemukannya. Posting
+yang sama dapat ditautkan ke beberapa eksekusi tanpa menggandakan analisis.
+Data sebelum fitur ini dikelompokkan sebagai **Data lama**; query asal posting lama
+tidak dapat direkonstruksi dengan pasti.
+
+**Hapus data eksekusi ini** menghapus riwayat eksekusi dan posting yang hanya ada
+di eksekusi tersebut, termasuk analisis dan kasusnya. Posting bersama tetap ada
+di eksekusi lain. **Hapus semua data** membersihkan seluruh hasil dan riwayat dari
+DB. Keduanya memerlukan konfirmasi `HAPUS` dan hanya tersedia saat scraping serta
+antrean analisis selesai. File screenshot/laporan, audit, konfigurasi, model, dan
+profil login browser tetap disimpan; tombol ini bukan penghapus semua file di disk.
+
+### Dua tahap analisis
+
+Dengan `SENTIMENT_PROVIDER=indobert`, ada satu worker IndoBERT dan satu worker
+konteks Ollama yang berjalan bersamaan:
+
+1. Hasil scraping disimpan sebagai `PENDING` di SQLite.
+2. IndoBERT memproses (`SENTIMENT_RUNNING`) dan menyimpan sentimen. Dashboard
+   segera dapat menampilkan positif/negatif/netral; konteks menjadi `CONTEXT_PENDING`.
+3. Ollama memproses konteks (`ANALYZING`) tanpa meminta klasifikasi sentimen lagi.
+   Hasil akhir berstatus `COMPLETED` atau `ANALYSIS_FAILED`.
+
+Antrean tidak bergantung pada buffer RAM: worker mengambil satu pekerjaan dari
+DB sehingga backlog Ollama tidak menahan IndoBERT. Saat restart, hanya tahap yang
+belum selesai yang diulang. Sentimen yang sudah tersimpan tetap tersedia jika
+Ollama gagal. Kegagalan IndoBERT ditandai terpisah sebagai sentimen unknown, sementara
+analisis konteks tetap dijalankan. Progres dan status dua tahap tersedia melalui API
+serta dashboard, yang memeriksa pembaruan sekitar setiap 3 detik saat tab aktif.
+
+Mode demo dan `SENTIMENT_PROVIDER=ollama` mempertahankan analisis gabungan lewat
+Ollama (mock dalam demo). Dua worker tidak berarti dua permintaan Ollama paralel;
+Ollama tetap satu worker agar kebutuhan memori terkendali.
+
+### Penyaringan relevansi setelah analisis konteks
+
+Setelah tahap Ollama berhasil, `relevant=false` membuat posting berstatus tampilan
+**Dikecualikan**. Posting tidak muncul pada daftar utama dan tidak dihitung dalam
+statistik sentimen, risiko, topik, serta laporan/CSV harian. Data, alasan, sentimen,
+dan hubungan eksekusinya tetap disimpan; pilih **Dikecualikan · tidak relevan** atau
+**Semua, termasuk dikecualikan** untuk menelusurinya.
+
+Posting yang konteksnya masih antre, diproses, atau gagal adalah **Belum dipastikan**,
+bukan otomatis tidak relevan. Sentimen awalnya tetap terlihat sebagai hasil sementara,
+terpisah dari grafik utama. Statistik utama hanya menghitung posting yang tahap
+konteksnya selesai dan dinilai relevan. Ini adalah penilaian model, bukan verifikasi
+identitas independen. Laporan mencantumkan jumlah `excluded_irrelevant` dan
+`pending_relevance` agar data yang tidak masuk statistik tetap bisa diketahui.
+
+API daftar mentions, review, dan cases mendukung `relevance=active` (default),
+`relevant`, `pending`, `excluded`, atau `all`, dan dapat digabung dengan filter eksekusi.
+Filter ini juga berlaku pada hasil analisis lama tanpa harus mengulang inferensi.

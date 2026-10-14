@@ -136,15 +136,35 @@ func (s *Server) routes() {
 	api.Get("/mentions", s.mentions)
 	api.Get("/mentions/:id", s.mention)
 	api.Post("/mentions/:id/cases", s.createCase)
+	api.Post("/mentions/:id/relevance", s.reviewRelevance)
 	api.Get("/review-queue", func(c *fiber.Ctx) error { c.Locals("review", true); return s.mentions(c) })
 	api.Get("/cases", s.cases)
 	api.Get("/cases/:id", s.caseDetail)
+	api.Get("/cases/:id/package", s.casePackage)
+	api.Get("/cases/:id/report.pdf", s.casePDF)
+	api.Get("/cases/:id/email-draft", s.caseEmail)
 	for path, status := range map[string]string{"request-approval": "WAITING_APPROVAL", "approve": "APPROVED", "reject": "REJECTED", "mark-submitted": "SUBMITTED_MANUALLY", "mark-removed": "REMOVED", "close": "CLOSED", "start-review": "UNDER_REVIEW", "mark-reviewing": "PLATFORM_REVIEWING", "mark-not-removed": "NOT_REMOVED"} {
 		to := status
 		api.Post("/cases/:id/"+path, func(c *fiber.Ctx) error { return s.transition(c, to) })
 	}
 	api.Get("/runs", s.runs)
 	api.Post("/runs", s.startRun)
+	api.Post("/batches", s.startBatch)
+	api.Get("/progress", s.progress)
+	api.Get("/executions", s.executions)
+	api.Post("/data/clear", s.clearData)
+	api.Get("/mentions/:id/runs", func(c *fiber.Ctx) error {
+		id, err := id(c)
+		if err != nil {
+			return err
+		}
+		runs, err := s.Store.MentionRuns(c.UserContext(), id)
+		if err != nil {
+			return err
+		}
+		return c.JSON(fiber.Map{"data": runs})
+	})
+	api.Post("/batches/stop", func(c *fiber.Ctx) error { return c.JSON(s.Supervisor.StopBatch()) })
 	api.Post("/runs/:id/retry", s.retryRun)
 	api.Get("/reports/daily", s.daily)
 	api.Get("/reports/daily.csv", s.dailyCSV)
@@ -207,6 +227,11 @@ func (s *Server) createSubject(c *fiber.Ctx) error {
 	return c.Status(201).JSON(v)
 }
 func (s *Server) mentions(c *fiber.Ctx) error {
+	relevance, e := relevanceFilter(c)
+	if e != nil {
+		return e
+	}
+
 	limit, offset, e := page(c)
 	if e != nil {
 		return e
@@ -224,7 +249,7 @@ func (s *Server) mentions(c *fiber.Ctx) error {
 			return fiber.NewError(400, "invalid date")
 		}
 	}
-	v, n, e := s.Store.Mentions(c.UserContext(), model.MentionFilter{Subject: c.Query("subject"), Source: c.Query("source"), Date: day, Sentiment: c.Query("sentiment"), Category: c.Query("risk_category"), MinRisk: minRisk, Limit: limit, Offset: offset, Review: c.Locals("review") == true})
+	v, n, e := s.Store.Mentions(c.UserContext(), model.MentionFilter{Relevance: relevance, Execution: c.Query("execution"), Subject: c.Query("subject"), Source: c.Query("source"), Date: day, Sentiment: c.Query("sentiment"), Category: c.Query("risk_category"), MinRisk: minRisk, Limit: limit, Offset: offset, Review: c.Locals("review") == true})
 	if e != nil {
 		return e
 	}
@@ -253,8 +278,12 @@ func (s *Server) createCase(c *fiber.Ctx) error {
 	if e != nil {
 		return e
 	}
-	if _, e = s.Store.Mention(c.UserContext(), v); e != nil {
+	m, e := s.Store.Mention(c.UserContext(), v)
+	if e != nil {
 		return e
+	}
+	if m.Relevance != "relevant" {
+		return fiber.NewError(409, "mention belum dinyatakan relevan oleh analisis konteks")
 	}
 	cas, e := s.Store.CreateCase(c.UserContext(), v, "local-reviewer")
 	if e != nil {
@@ -268,10 +297,15 @@ func (s *Server) cases(c *fiber.Ctx) error {
 	if e != nil {
 		return e
 	}
-	v, e := s.Store.Cases(c.UserContext())
+	relevance, e := relevanceFilter(c)
 	if e != nil {
 		return e
 	}
+	v, e := s.Store.CasesFiltered(c.UserContext(), model.MentionFilter{Execution: c.Query("execution"), Relevance: relevance})
+	if e != nil {
+		return e
+	}
+
 	total := len(v)
 	if offset > total {
 		offset = total
@@ -334,6 +368,16 @@ func (s *Server) runs(c *fiber.Ctx) error {
 	if e != nil {
 		return e
 	}
+	if execution := c.Query("execution"); execution != "" {
+		filtered := v[:0]
+		for _, r := range v {
+			if r.ExecutionID == execution {
+				filtered = append(filtered, r)
+			}
+		}
+		v = filtered
+	}
+
 	total := len(v)
 	if offset > total {
 		offset = total
@@ -369,19 +413,31 @@ func (s *Server) retryRun(c *fiber.Ctx) error {
 }
 func (s *Server) summary(c *fiber.Ctx) error {
 	day := time.Now().In(s.Store.Location).Format("2006-01-02")
-	mentions, e := s.Store.AllMentions(c.UserContext(), day)
+	mentions, e := s.Store.ExecutionMentions(c.UserContext(), c.Query("execution"))
 	if e != nil {
 		return e
 	}
 	sentiment := map[string]int{"positive": 0, "neutral": 0, "negative": 0, "unknown": 0}
 	high := 0
+	relevant, pending, excluded := 0, 0, 0
+	provisional := map[string]int{"positive": 0, "neutral": 0, "negative": 0, "unknown": 0}
 	for _, v := range mentions {
+		switch v.RelevanceState() {
+		case "excluded":
+			excluded++
+			continue
+		case "pending":
+			pending++
+			provisional[v.Analysis.Sentiment]++
+			continue
+		}
+		relevant++
 		sentiment[v.Analysis.Sentiment]++
 		if v.Analysis.RiskScore >= s.Config.RiskThreshold {
 			high++
 		}
 	}
-	_, review, e := s.Store.Mentions(c.UserContext(), model.MentionFilter{Review: true, Limit: 1})
+	_, review, e := s.Store.Mentions(c.UserContext(), model.MentionFilter{Relevance: "active", Execution: c.Query("execution"), Review: true, Limit: 1})
 	if e != nil {
 		return e
 	}
@@ -396,7 +452,7 @@ func (s *Server) summary(c *fiber.Ctx) error {
 	for name, adapter := range s.Supervisor.Sources {
 		sources[name] = adapter.CheckSession(ctx)
 	}
-	return c.JSON(fiber.Map{"date": day, "demo": s.Config.Demo, "collector_status": s.Supervisor.Active(), "current_run": s.Supervisor.Active(), "mentions_today": len(mentions), "sentiment": sentiment, "high_risk": high, "review_queue": review, "source_health": sources, "browser_sessions": sources, "ollama_health": health, "image_matching": "Image similarity only; not face recognition", "schedule": s.Config.Scheduler.StartTime + "–" + s.Config.Scheduler.StopTime + " " + s.Config.App.Timezone})
+	return c.JSON(fiber.Map{"date": day, "demo": s.Config.Demo, "collector_status": s.Supervisor.Active(), "current_run": s.Supervisor.Active(), "mentions_today": relevant, "stored_mentions": len(mentions), "pending_relevance": pending, "excluded_mentions": excluded, "provisional_sentiment": provisional, "sentiment": sentiment, "high_risk": high, "review_queue": review, "source_health": sources, "browser_sessions": sources, "ollama_health": health, "image_matching": "Image similarity only; not face recognition", "schedule": s.Config.Scheduler.StartTime + "–" + s.Config.Scheduler.StopTime + " " + s.Config.App.Timezone})
 }
 func (s *Server) daily(c *fiber.Ctx) error {
 	day, e := date(c, s.Store.Location)
